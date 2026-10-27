@@ -12,12 +12,83 @@ using System.Threading.Tasks;
 using System.Runtime.InteropServices;
 using QuickCrop;
 class Tests {
+    sealed class HeldLoadingWindow : MainWindow {
+        public readonly TaskCompletionSource<bool> Held = new TaskCompletionSource<bool>();
+        public readonly TaskCompletionSource<bool> Release = new TaskCompletionSource<bool>();
+        public ThumbnailResult[] PendingResults;
+        public int BatchCalls;
+        protected override async Task<ThumbnailResult[]> DecodeBatchAsync(string[] paths, CancellationToken cancellation) {
+            ThumbnailResult[] results = await base.DecodeBatchAsync(paths,cancellation);
+            BatchCalls++;
+            if (BatchCalls == 2) {
+                PendingResults = results; Held.SetResult(true);
+                await Release.Task.ConfigureAwait(false);
+            }
+            return results;
+        }
+    }
+    static void ClosingDuringLoad(string root) {
+        foreach (bool existingSession in new[] { false,true }) {
+            string folder = Path.Combine(root,"close-loading-"+existingSession); Directory.CreateDirectory(folder);
+            using (Bitmap source = new Bitmap(160,120)) {
+                using (Graphics g = Graphics.FromImage(source)) g.Clear(Color.Red);
+                for (int i = 0; i < ThumbnailLoader.Workers*3; i++) source.Save(Path.Combine(folder,"photo-"+i.ToString("D2")+".png"),ImageFormat.Png);
+            }
+            string path = Path.Combine(folder,SessionStore.FileName), backup = path+".bak";
+            if (existingSession) {
+                SessionStore.Save(folder,new FolderSession());
+                SessionStore.Save(folder,new FolderSession { CardSize = 400 });
+            }
+            string original = existingSession ? File.ReadAllText(path) : null, originalBackup = existingSession ? File.ReadAllText(backup) : null;
+            DateTime savedTime = existingSession ? File.GetLastWriteTimeUtc(path) : DateTime.MinValue;
+            DateTime backupTime = existingSession ? File.GetLastWriteTimeUtc(backup) : DateTime.MinValue;
+            using (HeldLoadingWindow window = new HeldLoadingWindow()) {
+                window.Show(); Task load = window.LoadFolderAsync(folder);
+                Pump(window.Held.Task); // First batch is displayed, second is decoded but pending.
+                Card first = Field<FlowLayoutPanel>((MainWindow)window,"grid").Controls.OfType<Card>().First();
+                first.Selected.Checked = true;
+                Check(first.View.RestoreCrop(Geometry.Fit(160,120,16.0/9,2,110,65)),"Could not edit during loading");
+                Pump(Task.Delay(800)); // Longer than the real autosave debounce.
+                Check(window.SaveSessionNow(),"Loading save should be safely deferred");
+                Check(existingSession ? File.ReadAllText(path) == original : !File.Exists(path),"Partial loading session was autosaved");
+                Stopwatch closing = Stopwatch.StartNew(); window.Close();
+                Check(window.IsDisposed && closing.Elapsed.TotalSeconds < 2,"Closing while loading blocked the user");
+                using (SessionLease released = new SessionLease(folder)) {} // Close must release ownership immediately.
+                window.Release.SetResult(true); Pump(load);
+                Check(window.BatchCalls == 2,"Cancellation started another decode batch");
+                Check(window.PendingResults.All(result => result.Image == null),"Pending thumbnails leaked after closing");
+            }
+            if (existingSession) {
+                Check(File.ReadAllText(path) == original && File.GetLastWriteTimeUtc(path) == savedTime,"Cancelled load changed existing JSON");
+                Check(File.ReadAllText(backup) == originalBackup && File.GetLastWriteTimeUtc(backup) == backupTime,"Cancelled load changed existing backup");
+            } else Check(!File.Exists(path) && !File.Exists(backup),"Cancelled load created a session or backup");
+            Check(Directory.GetFiles(folder,"*.tmp").Length == 0,"Cancelled load left partial writes");
+        }
+        using (CancellationTokenSource cancelled = new CancellationTokenSource()) {
+            cancelled.Cancel(); bool observed = false;
+            try { ThumbnailLoader.LoadBatch(new[] { "missing.png" },cancelled.Token).GetAwaiter().GetResult(); }
+            catch (OperationCanceledException) { observed = true; }
+            Check(observed,"Thumbnail loader ignored cancellation");
+        }
+        Console.WriteLine("PASS: close during loading (no JSON/backup writes, no blocking, immediate lease release, pending thumbnail cleanup, no further batches).");
+    }
     static void Check(bool value, string message) { if (!value) throw new Exception(message); }
     static void SameCrop(RectangleF a, RectangleF b, string message) {
         Check(Math.Abs(a.X-b.X)<.002 && Math.Abs(a.Y-b.Y)<.002 && Math.Abs(a.Width-b.Width)<.002 && Math.Abs(a.Height-b.Height)<.002,message);
     }
     static void NearColor(Color a, Color b, int tolerance, string message) {
         Check(Math.Abs(a.R-b.R)<=tolerance && Math.Abs(a.G-b.G)<=tolerance && Math.Abs(a.B-b.B)<=tolerance && Math.Abs(a.A-b.A)<=tolerance,message+": "+a+" / "+b);
+    }
+    static void CheckDisabledText(Control control, int leftInset) {
+        using (Bitmap capture = new Bitmap(control.Width,control.Height)) {
+            control.DrawToBitmap(capture,control.ClientRectangle);
+            int lightPixels = 0;
+            for (int y = 4; y < capture.Height-4; y++) for (int x = leftInset; x < capture.Width-4; x++) {
+                Color pixel = capture.GetPixel(x,y);
+                if (pixel.R > 190 && pixel.G > 190 && pixel.B > 190) lightPixels++;
+            }
+            Check(lightPixels > 5,"Disabled dark-theme text is unreadable: "+control.GetType().Name+" "+control.Text);
+        }
     }
     static void Pump(Task task) {
         Stopwatch timeout = Stopwatch.StartNew();
@@ -27,7 +98,7 @@ class Tests {
         }
         task.GetAwaiter().GetResult();
     }
-    static T Field<T>(object target, string name) { return (T)target.GetType().GetField(name,BindingFlags.Instance|BindingFlags.NonPublic).GetValue(target); }
+    static T Field<T>(object target, string name) { return (T)typeof(MainWindow).GetField(name,BindingFlags.Instance|BindingFlags.NonPublic).GetValue(target); }
     static void Mouse(CropView view, string method, MouseEventArgs args) {
         typeof(CropView).GetMethod(method,BindingFlags.Instance|BindingFlags.NonPublic).Invoke(view,new object[] { args });
     }
@@ -270,6 +341,7 @@ class Tests {
             ExportCorrespondence(temp);
             Sessions(temp);
             ReviewTests.Run(temp);
+            ClosingDuringLoad(temp);
             using (Bitmap source = new Bitmap(400,300)) {
                 using (Graphics g = Graphics.FromImage(source)) { g.Clear(Color.Blue); g.FillRectangle(Brushes.Red,200,0,200,300); }
                 source.Tag = "sample.png";
@@ -325,6 +397,22 @@ class Tests {
                     using (Bitmap capture = new Bitmap(window.Width,window.Height)) {
                         window.DrawToBitmap(capture,new Rectangle(0,0,window.Width,window.Height));
                         capture.Save(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,dark ? "preview-dark.png" : "preview-light.png"));
+                    }
+                    if (dark) {
+                        typeof(MainWindow).GetMethod("SetBusy",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(window,new object[] { true,true });
+                        try {
+                            FlowLayoutPanel toolbar = Field<FlowLayoutPanel>(window,"toolbar");
+                            CheckDisabledText(toolbar.Controls.OfType<Label>().Single(label => label.Text == "Card size"),5);
+                            CheckDisabledText(Field<CheckBox>(window,"resize"),32);
+                            foreach (ToolbarNumberHost input in toolbar.Controls.OfType<ToolbarNumberHost>()) CheckDisabledText(input,5);
+                            using (Bitmap busyCapture = new Bitmap(window.Width,window.Height)) {
+                                window.DrawToBitmap(busyCapture,new Rectangle(0,0,window.Width,window.Height));
+                                busyCapture.Save(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"preview-dark-busy.png"));
+                            }
+                        } finally {
+                            typeof(MainWindow).GetMethod("SetBusy",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(window,new object[] { false,false });
+                        }
+                        Check(Field<NumericUpDown>(window,"targetW").Visible,"Numeric input did not return after loading");
                     }
                 }
                 using (Bitmap capture = new Bitmap(window.Width,window.Height)) {

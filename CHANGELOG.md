@@ -2,7 +2,9 @@
 
 ## Unreleased
 
+- Allow immediate close during image loading, cancel remaining decode work, and discard partial edits without saving JSON or its backup.
 - Align toolbar dropdown and dimension fields with button heights; keep disabled button text readable in dark mode.
+- Keep disabled checkbox labels, ordinary labels, and dimension values readable during folder loading and export too.
 - Add **Select all** and **Select none** without changing crop framing.
 - Apply custom width/height together; preserve crops when the final ratio is unchanged.
 - Prevent session overwrite by a second instance or after detected external JSON changes.

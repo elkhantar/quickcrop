@@ -46,7 +46,9 @@ The input folder gets these small companion files:
 | `.quickcrop.json.bak` | Previous successful save |
 | `.quickcrop.lock` | Empty file used to coordinate app instances; its existence alone does not mean the folder is locked |
 
-Edits autosave after a short pause. The footer reports save success or failure. Pending edits are also flushed before folder switching, processing, and normal closing. **Apply size** must be used before custom numeric edits become part of the session.
+Edits autosave after a short pause, once the folder has finished loading. While images load, early card edits stay in memory only. Closing during loading exits immediately and discards those edits, leaving existing JSON and backup files unchanged (or creating neither if the folder had no session). No confirmation or wait-for-loading dialog is shown. The empty lock file may remain, but its lock is released.
+
+After a successful load, the footer reports save success or failure. Pending edits are flushed before folder switching, processing, and normal closing. **Apply size** must be used before custom numeric edits become part of the session.
 
 Reopen the same folder to restore the session. Copy the JSON file with the images if moving them elsewhere. Entries use filenames, not absolute paths. Renamed or changed images start with a fresh crop and no selection. Source identity is checked again at export, and changed sources are rejected rather than silently using stale framing. Identity uses length and last-modified time; changes preserving both may not be detected.
 
@@ -60,6 +62,8 @@ Malformed or oversized sessions are kept unchanged and autosave is disabled for 
 
 **Loading is slow:** local SSD storage is faster than network shares or removable disks. JPEGs can decode at reduced size; some formats still require a full internal decode. All cards stay in memory, so very large folders are best split into smaller batches.
 
-**Need to stop a batch:** this version has no Cancel control. Closing while an operation is running asks you to wait. Keep batches manageable; cancellation and virtualized cards remain future work.
+**Need to stop loading:** close the window. Further decode batches are cancelled, and partial selection/crop edits from this load are discarded without changing saved session data. An active native decoder may briefly finish its read in the background; it does not hold the window open or write image/session data.
+
+**Need to stop exporting:** this version still waits for the current export batch before closing. There is no export Cancel control yet. Keep export batches manageable.
 
 **Theme looks different:** the app follows the Windows app light/dark setting; high-contrast system colors take precedence. Native picker dialogs and some native control decorations still follow Windows rendering.

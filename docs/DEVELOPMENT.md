@@ -47,10 +47,11 @@ The source is deliberately still compact. Splitting persistence, imaging, and fo
 6. Pending custom dimensions do not reset crops, change saved target dimensions, or permit processing. Apply width and height together.
 7. User data is not silently replaced: JSON saves check the loaded revision; output publication never overwrites a file or directory.
 8. Corrupt sessions fail visibly without being rewritten. Check size before reading/parsing large JSON and validate every image entry.
+9. Loading is a session-save boundary: do not autosave early edits until the whole load succeeds. Closing during loading cancels future decode work, discards pending edits, releases the folder lease, and must not touch disposed controls or save JSON in an async continuation. Dispose pending thumbnails even when cancellation arrives after a batch has decoded.
 
 ## Tests and their limits
 
-The suite covers 10,000 generated crop geometries, four source DPI values, four manual rotations, crop-only and resized pixel correspondence, all eight EXIF orientations, autosave/reopen, Unicode names, stale source identity, locked writers, two app instances, external session edits, invalid/oversized JSON, atomic save failure, name collisions, bulk selection, pending size fields, focus, and light/dark rendering.
+The suite covers 10,000 generated crop geometries, four source DPI values, four manual rotations, crop-only and resized pixel correspondence, all eight EXIF orientations, autosave/reopen, Unicode names, stale source identity, locked writers, two app instances, external session edits, invalid/oversized JSON, atomic save failure, name collisions, bulk selection, pending size fields, focus, and light/dark rendering including disabled toolbar labels/values. A controlled pending batch verifies immediate close during loading, autosave suppression, unchanged JSON/backup contents and timestamps, no new session files, immediate lock release, thumbnail cleanup, and cancellation before further batches.
 
 The tests use generated images. They do not cover every real-world codec variation, monitor DPI combination, network filesystem, disk-full condition, or Windows version. They are regression checks, not proof that native image decoders are safe against arbitrary hostile files. Thumbnail memory and control virtualization are still open scaling work.
 

@@ -13,6 +13,7 @@ using System.Runtime.InteropServices;
 using System.Diagnostics;
 using System.Web.Script.Serialization;
 using System.Security.Cryptography;
+using System.Threading;
 
 namespace QuickCrop {
     public static class Geometry {
@@ -256,16 +257,22 @@ namespace QuickCrop {
     public static class ThumbnailLoader {
         // Bounded chunks avoid queuing thousands of decodes and cap transient memory usage.
         public static readonly int Workers = Math.Max(1, Math.Min(4, Environment.ProcessorCount));
-        public static Task<ThumbnailResult[]> LoadBatch(string[] paths) {
+        public static Task<ThumbnailResult[]> LoadBatch(string[] paths, CancellationToken cancellation = default(CancellationToken)) {
             return Task.Run(() => {
                 ThumbnailResult[] results = new ThumbnailResult[paths.Length];
-                Parallel.For(0, paths.Length, new ParallelOptions { MaxDegreeOfParallelism = Workers }, i => {
-                    ThumbnailResult result = new ThumbnailResult { Path = paths[i] };
-                    try { result.Image = Imaging.Thumbnail(paths[i]); }
-                    catch (Exception ex) { result.Error = ex.Message; }
-                    results[i] = result;
-                });
-                return results;
+                try {
+                    Parallel.For(0, paths.Length, new ParallelOptions { MaxDegreeOfParallelism = Workers, CancellationToken = cancellation }, i => {
+                        cancellation.ThrowIfCancellationRequested();
+                        ThumbnailResult result = new ThumbnailResult { Path = paths[i] }; results[i] = result;
+                        try { result.Image = Imaging.Thumbnail(paths[i]); }
+                        catch (Exception ex) { result.Error = ex.Message; }
+                    });
+                    cancellation.ThrowIfCancellationRequested();
+                    return results;
+                } catch {
+                    foreach (ThumbnailResult result in results) if (result != null) result.Dispose();
+                    throw;
+                }
             });
         }
     }
@@ -299,14 +306,15 @@ namespace QuickCrop {
                 control is Card || control is Button || control is ComboBox || control is NumericUpDown || control is ToolbarNumberHost ? surface : background;
             Button button = control as Button;
             if (button != null) { button.UseVisualStyleBackColor = false; button.FlatAppearance.BorderColor = foreground; }
-            ThemeButton themedButton = control as ThemeButton;
-            if (themedButton != null) themedButton.DarkTheme = foreground.GetBrightness() > .5 && !SystemInformation.HighContrast;
+            IDarkThemeControl themedControl = control as IDarkThemeControl;
+            if (themedControl != null) themedControl.DarkTheme = foreground.GetBrightness() > .5 && !SystemInformation.HighContrast;
             foreach (Control child in control.Controls) ApplyControl(child, control.BackColor, surface, foreground);
             control.Invalidate();
         }
     }
-    public class ThemeButton : Button {
-        public bool DarkTheme;
+    public interface IDarkThemeControl { bool DarkTheme { get; set; } }
+    public class ThemeButton : Button, IDarkThemeControl {
+        public bool DarkTheme { get; set; }
         protected override void OnPaint(PaintEventArgs e) {
             if (Enabled || !DarkTheme || SystemInformation.HighContrast) { base.OnPaint(e); return; }
             // Native disabled-button painting ignores ForeColor. Keep light text while a
@@ -318,18 +326,49 @@ namespace QuickCrop {
             TextRenderer.DrawText(e.Graphics,Text,Font,ClientRectangle,ForeColor,flags);
         }
     }
+    public class ThemeLabel : Label, IDarkThemeControl {
+        public bool DarkTheme { get; set; }
+        protected override void OnPaint(PaintEventArgs e) {
+            if (Enabled || !DarkTheme || SystemInformation.HighContrast) { base.OnPaint(e); return; }
+            Rectangle text = new Rectangle(Padding.Left,Padding.Top,Math.Max(0,Width-Padding.Horizontal),Math.Max(0,Height-Padding.Vertical));
+            TextFormatFlags flags = TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis;
+            if (TextAlign == ContentAlignment.MiddleLeft) flags |= TextFormatFlags.VerticalCenter;
+            TextRenderer.DrawText(e.Graphics,Text,Font,text,ForeColor,flags);
+        }
+    }
+    public class ThemeCheckBox : CheckBox, IDarkThemeControl {
+        public bool DarkTheme { get; set; }
+        protected override void OnPaint(PaintEventArgs e) {
+            if (Enabled || !DarkTheme || SystemInformation.HighContrast) { base.OnPaint(e); return; }
+            System.Windows.Forms.VisualStyles.CheckBoxState state = CheckState == CheckState.Indeterminate ? System.Windows.Forms.VisualStyles.CheckBoxState.MixedDisabled :
+                Checked ? System.Windows.Forms.VisualStyles.CheckBoxState.CheckedDisabled : System.Windows.Forms.VisualStyles.CheckBoxState.UncheckedDisabled;
+            Size glyph = CheckBoxRenderer.GetGlyphSize(e.Graphics,state);
+            int top = Padding.Top+Math.Max(0,(ClientSize.Height-Padding.Vertical-glyph.Height)/2);
+            CheckBoxRenderer.DrawCheckBox(e.Graphics,new Point(Padding.Left,top),state);
+            Rectangle text = new Rectangle(Padding.Left+glyph.Width+4,Padding.Top,Math.Max(0,Width-Padding.Horizontal-glyph.Width-4),Math.Max(0,Height-Padding.Vertical));
+            TextRenderer.DrawText(e.Graphics,Text,Font,text,ForeColor,TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        }
+    }
     public class ToolbarNumberHost : Panel {
         readonly NumericUpDown input;
         public ToolbarNumberHost(NumericUpDown input) {
             this.input = input; Width = 86; Height = 32; Margin = new Padding(3);
             DoubleBuffered = true; input.BorderStyle = BorderStyle.None; Controls.Add(input);
+            input.EnabledChanged += delegate {
+                // Native disabled edit controls ignore ForeColor. Let the host display the
+                // value while editing is disabled, then restore the original numeric control.
+                input.Visible = input.Enabled; Invalidate();
+            };
         }
         protected override void OnLayout(LayoutEventArgs e) {
             base.OnLayout(e);
             if (input != null) input.SetBounds(5,Math.Max(1,(ClientSize.Height-input.Height)/2),Math.Max(1,ClientSize.Width-10),input.Height);
         }
         protected override void OnPaint(PaintEventArgs e) {
-            base.OnPaint(e); ControlPaint.DrawBorder(e.Graphics,ClientRectangle,ForeColor,ButtonBorderStyle.Solid);
+            base.OnPaint(e);
+            ControlPaint.DrawBorder(e.Graphics,ClientRectangle,Enabled ? ForeColor : SystemInformation.HighContrast ? SystemColors.GrayText : Color.FromArgb(89,97,112),ButtonBorderStyle.Solid);
+            if (!input.Enabled) TextRenderer.DrawText(e.Graphics,input.Text,input.Font,new Rectangle(5,0,Math.Max(0,Width-10),Height),ForeColor,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
         }
     }
     public sealed class CropWheelRouter : IMessageFilter {
@@ -433,7 +472,7 @@ namespace QuickCrop {
     public class Card : Panel {
         public readonly string FilePath;
         public readonly CropView View;
-        public readonly CheckBox Selected = new CheckBox();
+        public readonly CheckBox Selected = new ThemeCheckBox();
         public readonly long FileLength, LastWriteUtcTicks;
         public int Turns;
         public Card(string path, Bitmap preview, double ratio, Action changed) {
@@ -453,7 +492,7 @@ namespace QuickCrop {
             Button reset = new ThemeButton { Text = "Fit", Width = 38, Height = 30, Left = 5, Top = 94, FlatStyle = FlatStyle.Flat, AccessibleName = "Reset crop" };
             reset.Click += delegate { View.Reset(View.Ratio); Selected.Checked = true; };
             side.Controls.AddRange(new Control[] { Selected, rotate, reset });
-            Label name = new Label { Text = Path.GetFileName(path), AutoEllipsis = true, Dock = DockStyle.Bottom, Height = 28, TextAlign = ContentAlignment.MiddleLeft };
+            Label name = new ThemeLabel { Text = Path.GetFileName(path), AutoEllipsis = true, Dock = DockStyle.Bottom, Height = 28, TextAlign = ContentAlignment.MiddleLeft };
             Controls.Add(View); Controls.Add(side); Controls.Add(name);
             View.Interacted += delegate { Selected.Checked = true; };
             View.Changed += changed;
@@ -487,23 +526,24 @@ namespace QuickCrop {
     public class MainWindow : Form {
         readonly FlowLayoutPanel grid = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(12) };
         readonly FlowLayoutPanel toolbar = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(12), WrapContents = true };
-        readonly Label status = new Label { Dock = DockStyle.Bottom, Height = 34, Padding = new Padding(15,8,0,0) };
+        readonly Label status = new ThemeLabel { Dock = DockStyle.Bottom, Height = 34, Padding = new Padding(15,8,0,0) };
         readonly NumericUpDown targetW = new NumericUpDown { Minimum = 1, Maximum = 16384, Value = 1920, Width = 80 };
         readonly NumericUpDown targetH = new NumericUpDown { Minimum = 1, Maximum = 16384, Value = 1080, Width = 80 };
-        readonly CheckBox resize = new CheckBox { Text = "Resize output", AutoSize = true, Padding = new Padding(8,5,8,0) };
+        readonly CheckBox resize = new ThemeCheckBox { Text = "Resize output", AutoSize = true, Padding = new Padding(8,5,8,0) };
         readonly TrackBar size = new TrackBar { Minimum = 240, Maximum = 720, Value = 360, Width = 135, Height = 32, TickStyle = TickStyle.None, SmallChange = 20, LargeChange = 80 };
         readonly Button process;
         readonly Button applySize;
         readonly ComboBox presets = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 160 };
-        readonly Label sessionNotice = new Label { Dock = DockStyle.Bottom, Height = 26, Padding = new Padding(15,3,0,0), AutoEllipsis = true };
+        readonly Label sessionNotice = new ThemeLabel { Dock = DockStyle.Bottom, Height = 26, Padding = new Padding(15,3,0,0), AutoEllipsis = true };
         readonly System.Windows.Forms.Timer saveTimer = new System.Windows.Forms.Timer { Interval = 500 };
         Dictionary<string,ImageState> remembered = new Dictionary<string,ImageState>(StringComparer.OrdinalIgnoreCase);
         string currentFolder;
         string sessionRevision;
         SessionLease sessionLease;
         readonly CropWheelRouter wheelRouter;
+        CancellationTokenSource loadCancellation;
         int appliedWidth = 1920, appliedHeight = 1080;
-        bool busy, updating, restoring, bulkEditing, sessionWritable = true, sessionDirty, dimensionsDirty;
+        bool busy, loading, discardLoadingSession, updating, restoring, bulkEditing, sessionWritable = true, sessionDirty, dimensionsDirty;
         double Ratio { get { return (double)appliedWidth/appliedHeight; } }
         IEnumerable<Card> Cards { get { return grid.Controls.OfType<Card>(); } }
         public MainWindow() {
@@ -535,16 +575,17 @@ namespace QuickCrop {
                     selected ? SystemColors.HighlightText : presets.ForeColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
                 e.DrawFocusRectangle();
             };
-            toolbar.Controls.AddRange(new Control[] { folder, selectAll, selectNone, presets, new ToolbarNumberHost(targetW), new Label { Text = "x", AutoSize = true, Padding = new Padding(0,8,0,0) }, new ToolbarNumberHost(targetH), applySize, resize,
-                new Label { Text = "Card size", AutoSize = true, Padding = new Padding(10,5,0,0) }, size, process });
+            toolbar.Controls.AddRange(new Control[] { folder, selectAll, selectNone, presets, new ToolbarNumberHost(targetW), new ThemeLabel { Text = "x", AutoSize = true, Padding = new Padding(0,8,0,0) }, new ToolbarNumberHost(targetH), applySize, resize,
+                new ThemeLabel { Text = "Card size", AutoSize = true, Padding = new Padding(10,5,0,0) }, size, process });
             FlowLayoutPanel help = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 42, Padding = new Padding(16,8,0,0) };
-            help.Controls.Add(new Label { Text = "Drag the crop to frame an image. Wheel up: tighter crop. Wheel down: wider crop. Editing selects the image.", AutoSize = true });
+            help.Controls.Add(new ThemeLabel { Text = "Drag the crop to frame an image. Wheel up: tighter crop. Wheel down: wider crop. Editing selects the image.", AutoSize = true });
             Controls.Add(grid); Controls.Add(help); Controls.Add(toolbar); Controls.Add(sessionNotice); Controls.Add(status);
             size.ValueChanged += delegate { grid.SuspendLayout(); foreach (Card card in Cards) SizeCard(card); grid.ResumeLayout(); QueueSave(); };
             resize.CheckedChanged += delegate { UpdateStatus(); QueueSave(); };
             saveTimer.Tick += delegate { SaveSessionNow(); };
             FormClosing += delegate(object sender, FormClosingEventArgs e) {
-                if (busy) { e.Cancel = true; MessageBox.Show(this,"Please wait for the current operation to finish.","QuickCrop"); }
+                if (loading) { CancelLoadingForExit(); return; }
+                if (busy) { e.Cancel = true; MessageBox.Show(this,"Please wait for the current export to finish.","QuickCrop"); }
                 else if (!SaveSessionNow()) e.Cancel = MessageBox.Show(this,"Selections could not be saved. Close without saving?\n\n"+sessionNotice.Text,"Unsaved session",MessageBoxButtons.YesNo,MessageBoxIcon.Warning,MessageBoxDefaultButton.Button2) != DialogResult.Yes;
             };
             UpdateStatus();
@@ -592,12 +633,17 @@ namespace QuickCrop {
         }
         void CardChanged() { if (bulkEditing) return; UpdateStatus(); QueueSave(); }
         void QueueSave() {
-            if (restoring || currentFolder == null) return;
+            if (restoring || currentFolder == null || discardLoadingSession || IsDisposed || Disposing) return;
             sessionDirty = true;
+            if (loading) {
+                if (sessionWritable) sessionNotice.Text = "Edits will be saved after loading finishes. Closing now discards this load.";
+                return;
+            }
             if (!sessionWritable) return;
             sessionNotice.Text = "Saving selections..."; saveTimer.Stop(); saveTimer.Start();
         }
         public bool SaveSessionNow() {
+            if (loading || discardLoadingSession || IsDisposed || Disposing) return true;
             saveTimer.Stop();
             if (!sessionDirty || currentFolder == null) return true;
             if (!sessionWritable) return false;
@@ -610,11 +656,17 @@ namespace QuickCrop {
         }
         protected override void Dispose(bool disposing) {
             if (disposing) {
+                CancelLoadingForExit();
                 saveTimer.Stop(); saveTimer.Dispose();
                 if (sessionLease != null) { sessionLease.Dispose(); sessionLease = null; }
                 if (wheelRouter != null) Application.RemoveMessageFilter(wheelRouter);
             }
             base.Dispose(disposing);
+        }
+        void CancelLoadingForExit() {
+            if (!loading) return;
+            discardLoadingSession = true; sessionDirty = false; saveTimer.Stop();
+            if (loadCancellation != null) loadCancellation.Cancel();
         }
         void UpdateStatus() {
             if (process != null) process.Enabled = !busy && !dimensionsDirty && Cards.Any();
@@ -623,7 +675,7 @@ namespace QuickCrop {
                 Cards.Count() == 0 ? "Open a folder to begin. Supported: JPG, PNG, BMP, GIF, TIFF." : Cards.Count()+" images  |  "+Cards.Count(c => c.Selected.Checked)+" selected  |  "+(resize.Checked ? "Resize" : "Crop only");
         }
         void SetBusy(bool value, bool loading = false) {
-            busy = value; toolbar.Enabled = !value; grid.Enabled = !value || loading;
+            busy = value; this.loading = value && loading; toolbar.Enabled = !value; grid.Enabled = !value || loading;
             UseWaitCursor = value && !loading;
             UpdateStatus();
         }
@@ -631,8 +683,11 @@ namespace QuickCrop {
             using (FolderBrowserDialog dialog = new FolderBrowserDialog { Description = "Choose an input folder", ShowNewFolderButton = false }) {
                 if (dialog.ShowDialog(this) != DialogResult.OK) return;
                 try { await LoadFolderAsync(dialog.SelectedPath); }
-                catch (Exception ex) { MessageBox.Show(this,ex.Message,"Unable to open folder"); }
+                catch (Exception ex) { if (!IsDisposed && !Disposing) MessageBox.Show(this,ex.Message,"Unable to open folder"); }
             }
+        }
+        protected virtual Task<ThumbnailResult[]> DecodeBatchAsync(string[] paths, CancellationToken cancellation) {
+            return ThumbnailLoader.LoadBatch(paths,cancellation);
         }
         public async Task LoadFolderAsync(string folder) {
                 if (busy) throw new InvalidOperationException("Another operation is in progress.");
@@ -645,7 +700,7 @@ namespace QuickCrop {
                 grid.SuspendLayout();
                 try { foreach (Control c in grid.Controls.Cast<Control>().ToArray()) c.Dispose(); }
                 finally { grid.ResumeLayout(); }
-                currentFolder = folder; sessionDirty = false; sessionWritable = true; saveTimer.Stop(); sessionNotice.Text = "";
+                currentFolder = folder; sessionDirty = false; sessionWritable = true; discardLoadingSession = false; saveTimer.Stop(); sessionNotice.Text = "";
                 try { sessionLease = new SessionLease(folder); }
                 catch (IOException ex) { sessionWritable = false; sessionNotice.Text = "Session is read-only (folder may be open in another QuickCrop): "+ex.Message; }
                 catch (UnauthorizedAccessException ex) { sessionWritable = false; sessionNotice.Text = "Session is read-only: "+ex.Message; }
@@ -669,14 +724,20 @@ namespace QuickCrop {
                     for (int p = 0; p < 6; p++) if (presets.Items[p].ToString().StartsWith(session.TargetWidth+" x "+session.TargetHeight+" ",StringComparison.Ordinal)) { presets.SelectedIndex = p; break; }
                 } finally { updating = false; restoring = false; }
                 SetBusy(true, true); List<string> errors = new List<string>();
+                CancellationTokenSource cancellation = new CancellationTokenSource(); loadCancellation = cancellation;
+                CancellationToken token = cancellation.Token;
                 Stopwatch timer = Stopwatch.StartNew();
                 try {
                     for (int i = 0; i < files.Length; i += ThumbnailLoader.Workers) {
+                        token.ThrowIfCancellationRequested();
                         status.Text = "Loading "+Math.Min(i+ThumbnailLoader.Workers,files.Length)+" / "+files.Length;
-                        ThumbnailResult[] batch = await ThumbnailLoader.LoadBatch(files.Skip(i).Take(ThumbnailLoader.Workers).ToArray());
-                        grid.SuspendLayout();
+                        ThumbnailResult[] batch = await DecodeBatchAsync(files.Skip(i).Take(ThumbnailLoader.Workers).ToArray(),token);
                         try {
+                            token.ThrowIfCancellationRequested();
+                            if (IsDisposed || Disposing) return;
+                            grid.SuspendLayout();
                             foreach (ThumbnailResult result in batch) {
+                                token.ThrowIfCancellationRequested();
                                 if (result.Error != null) { errors.Add(Path.GetFileName(result.Path)+": "+result.Error); continue; }
                                 Card card = null;
                                 try {
@@ -693,11 +754,19 @@ namespace QuickCrop {
                             }
                         } finally {
                             foreach (ThumbnailResult result in batch) result.Dispose();
-                            grid.ResumeLayout();
+                            if (!IsDisposed && !Disposing) grid.ResumeLayout();
                         }
                     }
                     Text = "QuickCrop - "+folder;
-                } finally { SetBusy(false); UpdateStatus(); }
+                } catch (OperationCanceledException) {
+                    if (!token.IsCancellationRequested) throw;
+                    return;
+                } finally {
+                    loadCancellation = null; cancellation.Dispose();
+                    loading = false;
+                    if (!IsDisposed && !Disposing) { SetBusy(false); UpdateStatus(); }
+                }
+                if (discardLoadingSession || IsDisposed || Disposing) return;
                 status.Text += "  |  Loaded in "+timer.Elapsed.TotalSeconds.ToString("0.0")+" s";
                 if (sessionWritable) QueueSave();
                 if (errors.Count > 0) MessageBox.Show(this, "Skipped "+errors.Count+" unreadable images:\n"+String.Join("\n", errors.Take(12)), "Loading report");

@@ -24,10 +24,12 @@ The test host now runs a real Windows Forms message loop and reports failures th
 
 The full local suite includes the existing preview/export pixel tests, EXIF/DPI cases, autosave and normal close, theme contrast, and generated geometry cases. See `Tests.cs` and `ReviewTests.cs` for executable scenarios.
 
+Follow-up improvements: disabled dark-theme labels, checkboxes, and numeric displays now retain readable text during loading/export. Closing during image loading cancels and exits without saving partial session state. Autosave is held until a load succeeds. Tests hold a decoded batch pending to verify close responsiveness, no session/backup modifications (including timestamps), prompt lock release, pending thumbnail disposal, and no subsequent batches.
+
 ## Remaining limits and improvements
 
 - **Scaling:** every card/thumbnail stays in memory. The worker pool bounds concurrent decodes, not the entire folder. A virtualized grid and bounded thumbnail cache are the next substantial performance change.
-- **Cancellation:** native decoding/encoding and batches have no Cancel control. The current UI waits for completion before closing. Adding cancellation between files and a graceful deferred close is still useful work.
+- **Export cancellation:** closing during image loading now cancels and discards that load's edits immediately. Export still waits for completion before closing; a dedicated export cancellation control is still useful work. Native decoders cannot be interrupted mid-call, but their read-only background work does not hold a loading window open.
 - **Resource limits:** 100 MP / 64 MP caps reduce avoidable allocations but do not guarantee a batch fits available memory, particularly for formats that decode fully inside native codecs.
 - **Source identity:** size and timestamp detect ordinary changes, not deliberately timestamp-preserving edits. Hashing full images would be stronger but would add significant folder I/O.
 - **Storage:** session backup/replacement and output moves use Windows filesystem guarantees. Network shares and removable filesystems may behave differently; simultaneous writes by unrelated tools can still race the final revision check.
