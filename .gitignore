@@ -1,0 +1,8 @@
+/dist/
+/.vs/
+*.user
+*.suo
+*.tmp
+.quickcrop.json
+.quickcrop.json.bak
+.quickcrop.lock
