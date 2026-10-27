@@ -320,7 +320,7 @@ class Tests {
                 foreach (bool dark in new[] { false,true }) {
                     AppTheme.Apply(window,dark);
                     Check(dark ? card.View.ForeColor.GetBrightness() > .8 : card.View.ForeColor.GetBrightness() < .3,"Card text theme contrast");
-                    foreach (NumericUpDown field in window.Controls.OfType<FlowLayoutPanel>().SelectMany(p => p.Controls.OfType<NumericUpDown>()))
+                    foreach (NumericUpDown field in new[] { Field<NumericUpDown>(window,"targetW"), Field<NumericUpDown>(window,"targetH") })
                         Check(Math.Abs(field.ForeColor.GetBrightness()-field.BackColor.GetBrightness()) > .6,"Resolution field contrast");
                     using (Bitmap capture = new Bitmap(window.Width,window.Height)) {
                         window.DrawToBitmap(capture,new Rectangle(0,0,window.Width,window.Height));

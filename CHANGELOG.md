@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Align toolbar dropdown and dimension fields with button heights; keep disabled button text readable in dark mode.
 - Add **Select all** and **Select none** without changing crop framing.
 - Apply custom width/height together; preserve crops when the final ratio is unchanged.
 - Prevent session overwrite by a second instance or after detected external JSON changes.

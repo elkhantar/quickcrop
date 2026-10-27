@@ -296,11 +296,40 @@ namespace QuickCrop {
         static void ApplyControl(Control control, Color background, Color surface, Color foreground) {
             control.ForeColor = foreground;
             control.BackColor = control is CropView ? Color.FromArgb(24,27,32) :
-                control is Card || control is Button || control is ComboBox || control is NumericUpDown ? surface : background;
+                control is Card || control is Button || control is ComboBox || control is NumericUpDown || control is ToolbarNumberHost ? surface : background;
             Button button = control as Button;
             if (button != null) { button.UseVisualStyleBackColor = false; button.FlatAppearance.BorderColor = foreground; }
+            ThemeButton themedButton = control as ThemeButton;
+            if (themedButton != null) themedButton.DarkTheme = foreground.GetBrightness() > .5 && !SystemInformation.HighContrast;
             foreach (Control child in control.Controls) ApplyControl(child, control.BackColor, surface, foreground);
             control.Invalidate();
+        }
+    }
+    public class ThemeButton : Button {
+        public bool DarkTheme;
+        protected override void OnPaint(PaintEventArgs e) {
+            if (Enabled || !DarkTheme || SystemInformation.HighContrast) { base.OnPaint(e); return; }
+            // Native disabled-button painting ignores ForeColor. Keep light text while a
+            // muted border distinguishes disabled actions; normal Button behavior is retained.
+            e.Graphics.Clear(Color.FromArgb(35,39,47));
+            ControlPaint.DrawBorder(e.Graphics,ClientRectangle,Color.FromArgb(89,97,112),ButtonBorderStyle.Solid);
+            TextFormatFlags flags = TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis;
+            if (!ShowKeyboardCues) flags |= TextFormatFlags.HidePrefix;
+            TextRenderer.DrawText(e.Graphics,Text,Font,ClientRectangle,ForeColor,flags);
+        }
+    }
+    public class ToolbarNumberHost : Panel {
+        readonly NumericUpDown input;
+        public ToolbarNumberHost(NumericUpDown input) {
+            this.input = input; Width = 86; Height = 32; Margin = new Padding(3);
+            DoubleBuffered = true; input.BorderStyle = BorderStyle.None; Controls.Add(input);
+        }
+        protected override void OnLayout(LayoutEventArgs e) {
+            base.OnLayout(e);
+            if (input != null) input.SetBounds(5,Math.Max(1,(ClientSize.Height-input.Height)/2),Math.Max(1,ClientSize.Width-10),input.Height);
+        }
+        protected override void OnPaint(PaintEventArgs e) {
+            base.OnPaint(e); ControlPaint.DrawBorder(e.Graphics,ClientRectangle,ForeColor,ButtonBorderStyle.Solid);
         }
     }
     public sealed class CropWheelRouter : IMessageFilter {
@@ -419,9 +448,9 @@ namespace QuickCrop {
             Panel side = new Panel { Dock = DockStyle.Right, Width = 45 };
             Selected.Text = ""; Selected.SetBounds(15, 12, 22, 24); Selected.AccessibleName = "Select " + Path.GetFileName(path);
             Selected.CheckedChanged += delegate { changed(); };
-            Button rotate = new Button { Text = "\u21b6", Width = 38, Height = 36, Left = 5, Top = 48, FlatStyle = FlatStyle.Flat, AccessibleName = "Rotate left 90 degrees" };
+            Button rotate = new ThemeButton { Text = "\u21b6", Width = 38, Height = 36, Left = 5, Top = 48, FlatStyle = FlatStyle.Flat, AccessibleName = "Rotate left 90 degrees" };
             rotate.Click += delegate { RotateLeft(); };
-            Button reset = new Button { Text = "Fit", Width = 38, Height = 30, Left = 5, Top = 94, FlatStyle = FlatStyle.Flat, AccessibleName = "Reset crop" };
+            Button reset = new ThemeButton { Text = "Fit", Width = 38, Height = 30, Left = 5, Top = 94, FlatStyle = FlatStyle.Flat, AccessibleName = "Reset crop" };
             reset.Click += delegate { View.Reset(View.Ratio); Selected.Checked = true; };
             side.Controls.AddRange(new Control[] { Selected, rotate, reset });
             Label name = new Label { Text = Path.GetFileName(path), AutoEllipsis = true, Dock = DockStyle.Bottom, Height = 28, TextAlign = ContentAlignment.MiddleLeft };
@@ -506,7 +535,7 @@ namespace QuickCrop {
                     selected ? SystemColors.HighlightText : presets.ForeColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
                 e.DrawFocusRectangle();
             };
-            toolbar.Controls.AddRange(new Control[] { folder, selectAll, selectNone, presets, targetW, new Label { Text = "x", AutoSize = true, Padding = new Padding(0,5,0,0) }, targetH, applySize, resize,
+            toolbar.Controls.AddRange(new Control[] { folder, selectAll, selectNone, presets, new ToolbarNumberHost(targetW), new Label { Text = "x", AutoSize = true, Padding = new Padding(0,8,0,0) }, new ToolbarNumberHost(targetH), applySize, resize,
                 new Label { Text = "Card size", AutoSize = true, Padding = new Padding(10,5,0,0) }, size, process });
             FlowLayoutPanel help = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 42, Padding = new Padding(16,8,0,0) };
             help.Controls.Add(new Label { Text = "Drag the crop to frame an image. Wheel up: tighter crop. Wheel down: wider crop. Editing selects the image.", AutoSize = true });
@@ -520,6 +549,7 @@ namespace QuickCrop {
             };
             UpdateStatus();
             AppTheme.Apply(this, AppTheme.IsDark);
+            Shown += delegate { AlignToolbarControls(); };
             wheelRouter = new CropWheelRouter(this); Application.AddMessageFilter(wheelRouter);
         }
         protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); AppTheme.Apply(this, AppTheme.IsDark); }
@@ -528,7 +558,18 @@ namespace QuickCrop {
             if ((m.Msg == 0x001A || m.Msg == 0x031A) && IsHandleCreated && !IsDisposed) AppTheme.Apply(this, AppTheme.IsDark);
         }
         Button MakeButton(string text, EventHandler action) {
-            Button b = new Button { Text = text, AutoSize = true, Height = 32, FlatStyle = FlatStyle.Flat, Padding = new Padding(6,2,6,2) }; b.Click += action; return b;
+            Button b = new ThemeButton { Text = text, AutoSize = true, Height = 32, FlatStyle = FlatStyle.Flat, Padding = new Padding(6,2,6,2) }; b.Click += action; return b;
+        }
+        void AlignToolbarControls() {
+            int height = toolbar.Controls.OfType<Button>().Max(b => b.Height);
+            int comboChrome = presets.Height-presets.ItemHeight;
+            toolbar.SuspendLayout();
+            try {
+                presets.ItemHeight = Math.Max(Font.Height,height-comboChrome);
+                foreach (ToolbarNumberHost host in toolbar.Controls.OfType<ToolbarNumberHost>()) host.Height = height;
+                resize.Padding = new Padding(8,Math.Max(0,(height-resize.Font.Height-4)/2),8,0);
+                size.Height = height;
+            } finally { toolbar.ResumeLayout(); }
         }
         void SizeCard(Card card) { card.Size = new Size(size.Value, (int)(size.Value*.70)+36); }
         public bool ApplyDimensions() {
