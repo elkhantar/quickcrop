@@ -68,6 +68,8 @@ The suite covers 10,000 generated crop geometries, four source DPI values, four 
 
 The tests use generated images. They do not cover every real-world codec variation, monitor DPI combination, network filesystem, disk-full condition, or Windows version. They are regression checks, not proof that native image decoders are safe against arbitrary hostile files. Thumbnail memory and control virtualization are still open scaling work.
 
+The suite also tests partial repainting of disabled toolbar controls in translated graphics buffers, checking pixels outside the invalidated region. After compiling tests, run that regression alone with `dist\checks\Tests.exe --paint-regression`.
+
 Seam-specific checks compare 40 small random RGBA images against an independent slow full-energy-recomputation reference on both axes. Additional fixtures cover mild high-contrast subject preservation (not a guarantee for arbitrary subjects), single rows/columns, whole-source export despite a smaller manual crop, rotation, carving before scaling, exact resized dimensions, progress-triggered cancellation with no partial outputs, cancel-button wiring, mode restoration, and old session compatibility.
 
 For a local decode benchmark:

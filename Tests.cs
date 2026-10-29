@@ -90,6 +90,30 @@ class Tests {
             Check(lightPixels > 5,"Disabled dark-theme text is unreadable: "+control.GetType().Name+" "+control.Text);
         }
     }
+    static void CheckClippedToolbarPaint() {
+        using (ThemeCheckBox checkbox = new ThemeCheckBox { Text = "Seam carving (experimental)", Size = new Size(260,36), Padding = new Padding(8,5,8,0) })
+        using (ThemeLabel label = new ThemeLabel { Text = "Card size", Size = new Size(120,36) })
+        using (ThemeButton button = new ThemeButton { Text = "Apply size", Size = new Size(100,36), FlatStyle = FlatStyle.Flat })
+        using (ToolbarNumberHost number = new ToolbarNumberHost(new NumericUpDown { Maximum = 16384, Value = 1920 })) {
+            foreach (Control control in new Control[] { checkbox,label,button,number }) {
+                AppTheme.Apply(control,true); control.Enabled = false;
+                using (Bitmap bitmap = new Bitmap(420,140))
+                using (Graphics graphics = Graphics.FromImage(bitmap)) {
+                    Color untouched = Color.Magenta; graphics.Clear(untouched);
+                    graphics.TranslateTransform(70,40);
+                    Rectangle clip = new Rectangle(35,4,50,24); graphics.SetClip(clip);
+                    control.GetType().GetMethod("OnPaint",BindingFlags.Instance|BindingFlags.NonPublic)
+                        .Invoke(control,new object[] { new PaintEventArgs(graphics,clip) });
+                    graphics.Flush();
+                    Rectangle expected = new Rectangle(105,44,50,24);
+                    for (int y = 0; y < bitmap.Height; y++) for (int x = 0; x < bitmap.Width; x++)
+                        Check(expected.Contains(x,y) || bitmap.GetPixel(x,y).ToArgb() == untouched.ToArgb(),
+                            "Disabled toolbar paint escaped its translated invalidation region: "+control.GetType().Name);
+                }
+            }
+        }
+        Console.WriteLine("PASS: disabled toolbar text/glyph painting respects partial clipping and translated buffers.");
+    }
     static void Pump(Task task) {
         Stopwatch timeout = Stopwatch.StartNew();
         while (!task.IsCompleted) {
@@ -336,6 +360,7 @@ class Tests {
         string temp = Path.Combine(Path.GetTempPath(),"QuickCrop-test-"+Guid.NewGuid()); Directory.CreateDirectory(temp);
         try {
             if (args.Contains("--benchmark")) { Benchmark(temp); return; }
+            if (args.Contains("--paint-regression")) { CheckClippedToolbarPaint(); return; }
             OrientationFixtures(temp);
             DpiFixture(temp);
             ExportCorrespondence(temp);
@@ -343,6 +368,7 @@ class Tests {
             ReviewTests.Run(temp);
             ClosingDuringLoad(temp);
             SeamCarverTests.Run(temp);
+            CheckClippedToolbarPaint();
             using (Bitmap source = new Bitmap(400,300)) {
                 using (Graphics g = Graphics.FromImage(source)) { g.Clear(Color.Blue); g.FillRectangle(Brushes.Red,200,0,200,300); }
                 source.Tag = "sample.png";

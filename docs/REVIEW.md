@@ -28,6 +28,8 @@ Follow-up improvements: disabled dark-theme labels, checkboxes, and numeric disp
 
 2026-10-29: added optional **Seam carving (experimental)**. It uses the entire oriented image and keeps manual crop state separate. New tests check both axes against a full-recomputation reference, alpha, narrow images, whole-source export, carving-before-rescaling, mode/session compatibility, and cancellation without publishing a partial output. Actual carving is capped at 24 MP. Severe reductions can distort important content despite high gradients; this mode is not a semantic subject-preservation guarantee.
 
+A later loading-state rendering regression was reproduced by painting disabled toolbar controls into a translated buffer with a small dirty region: the checkbox renderer wrote outside the allowed region. Custom text drawing now preserves graphics clipping and translation, disabled checkbox glyphs use clipped GDI+ drawing, and backgrounds are repainted without clearing unrelated buffer pixels. Toolbar state changes are applied in one layout batch. A focused regression checks that checkboxes, labels, buttons, and numeric displays leave pixels outside the dirty region untouched.
+
 ## Remaining limits and improvements
 
 - **Scaling:** every card/thumbnail stays in memory. The worker pool bounds concurrent decodes, not the entire folder. A virtualized grid and bounded thumbnail cache are the next substantial performance change.

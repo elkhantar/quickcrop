@@ -297,6 +297,7 @@ namespace QuickCrop {
         }
     }
     public static class AppTheme {
+        internal const TextFormatFlags PaintFlags = TextFormatFlags.PreserveGraphicsClipping | TextFormatFlags.PreserveGraphicsTranslateTransform;
         [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
         public static bool IsDark {
             get {
@@ -335,38 +336,59 @@ namespace QuickCrop {
     public interface IDarkThemeControl { bool DarkTheme { get; set; } }
     public class ThemeButton : Button, IDarkThemeControl {
         public bool DarkTheme { get; set; }
+        public ThemeButton() { DoubleBuffered = true; SetStyle(ControlStyles.ResizeRedraw,true); }
         protected override void OnPaint(PaintEventArgs e) {
             if (Enabled || !DarkTheme || SystemInformation.HighContrast) { base.OnPaint(e); return; }
             // Native disabled-button painting ignores ForeColor. Keep light text while a
             // muted border distinguishes disabled actions; normal Button behavior is retained.
-            e.Graphics.Clear(Color.FromArgb(35,39,47));
+            using (Brush background = new SolidBrush(Color.FromArgb(35,39,47))) e.Graphics.FillRectangle(background,ClientRectangle);
             ControlPaint.DrawBorder(e.Graphics,ClientRectangle,Color.FromArgb(89,97,112),ButtonBorderStyle.Solid);
-            TextFormatFlags flags = TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis;
+            TextFormatFlags flags = AppTheme.PaintFlags | TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis;
             if (!ShowKeyboardCues) flags |= TextFormatFlags.HidePrefix;
             TextRenderer.DrawText(e.Graphics,Text,Font,ClientRectangle,ForeColor,flags);
         }
     }
     public class ThemeLabel : Label, IDarkThemeControl {
         public bool DarkTheme { get; set; }
+        public ThemeLabel() { DoubleBuffered = true; SetStyle(ControlStyles.ResizeRedraw,true); }
         protected override void OnPaint(PaintEventArgs e) {
             if (Enabled || !DarkTheme || SystemInformation.HighContrast) { base.OnPaint(e); return; }
+            using (Brush background = new SolidBrush(BackColor)) e.Graphics.FillRectangle(background,ClientRectangle);
             Rectangle text = new Rectangle(Padding.Left,Padding.Top,Math.Max(0,Width-Padding.Horizontal),Math.Max(0,Height-Padding.Vertical));
-            TextFormatFlags flags = TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis;
+            TextFormatFlags flags = AppTheme.PaintFlags | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis;
             if (TextAlign == ContentAlignment.MiddleLeft) flags |= TextFormatFlags.VerticalCenter;
             TextRenderer.DrawText(e.Graphics,Text,Font,text,ForeColor,flags);
         }
     }
     public class ThemeCheckBox : CheckBox, IDarkThemeControl {
         public bool DarkTheme { get; set; }
+        public ThemeCheckBox() { DoubleBuffered = true; SetStyle(ControlStyles.ResizeRedraw,true); }
         protected override void OnPaint(PaintEventArgs e) {
             if (Enabled || !DarkTheme || SystemInformation.HighContrast) { base.OnPaint(e); return; }
+            using (Brush background = new SolidBrush(BackColor)) e.Graphics.FillRectangle(background,ClientRectangle);
             System.Windows.Forms.VisualStyles.CheckBoxState state = CheckState == CheckState.Indeterminate ? System.Windows.Forms.VisualStyles.CheckBoxState.MixedDisabled :
                 Checked ? System.Windows.Forms.VisualStyles.CheckBoxState.CheckedDisabled : System.Windows.Forms.VisualStyles.CheckBoxState.UncheckedDisabled;
             Size glyph = CheckBoxRenderer.GetGlyphSize(e.Graphics,state);
             int top = Padding.Top+Math.Max(0,(ClientSize.Height-Padding.Vertical-glyph.Height)/2);
-            CheckBoxRenderer.DrawCheckBox(e.Graphics,new Point(Padding.Left,top),state);
+            Rectangle box = new Rectangle(Padding.Left,top,glyph.Width-1,glyph.Height-1);
+            // GDI+ keeps the caller's clip and translated paint-buffer coordinates intact.
+            // Native glyph/text drawing must not escape into neighboring toolbar controls.
+            using (Brush fill = new SolidBrush(Color.FromArgb(55,62,73))) e.Graphics.FillRectangle(fill,box);
+            using (Pen border = new Pen(Color.FromArgb(126,136,151))) e.Graphics.DrawRectangle(border,box);
+            if (CheckState != CheckState.Unchecked) {
+                GraphicsState saved = e.Graphics.Save();
+                try {
+                    e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                    using (Pen mark = new Pen(ForeColor,Math.Max(1.5f,glyph.Width/7f))) {
+                        if (CheckState == CheckState.Indeterminate)
+                            e.Graphics.DrawLine(mark,box.Left+box.Width*.2f,box.Top+box.Height*.5f,box.Left+box.Width*.8f,box.Top+box.Height*.5f);
+                        else e.Graphics.DrawLines(mark,new[] { new PointF(box.Left+box.Width*.2f,box.Top+box.Height*.5f),
+                            new PointF(box.Left+box.Width*.43f,box.Top+box.Height*.75f),new PointF(box.Left+box.Width*.82f,box.Top+box.Height*.22f) });
+                    }
+                } finally { e.Graphics.Restore(saved); }
+            }
             Rectangle text = new Rectangle(Padding.Left+glyph.Width+4,Padding.Top,Math.Max(0,Width-Padding.Horizontal-glyph.Width-4),Math.Max(0,Height-Padding.Vertical));
-            TextRenderer.DrawText(e.Graphics,Text,Font,text,ForeColor,TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            TextRenderer.DrawText(e.Graphics,Text,Font,text,ForeColor,AppTheme.PaintFlags | TextFormatFlags.SingleLine | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
         }
     }
     public class ToolbarNumberHost : Panel {
@@ -386,9 +408,10 @@ namespace QuickCrop {
         }
         protected override void OnPaint(PaintEventArgs e) {
             base.OnPaint(e);
+            using (Brush background = new SolidBrush(BackColor)) e.Graphics.FillRectangle(background,ClientRectangle);
             ControlPaint.DrawBorder(e.Graphics,ClientRectangle,Enabled ? ForeColor : SystemInformation.HighContrast ? SystemColors.GrayText : Color.FromArgb(89,97,112),ButtonBorderStyle.Solid);
             if (!input.Enabled) TextRenderer.DrawText(e.Graphics,input.Text,input.Font,new Rectangle(5,0,Math.Max(0,Width-10),Height),ForeColor,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+                AppTheme.PaintFlags | TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
         }
     }
     public sealed class CropWheelRouter : IMessageFilter {
@@ -611,7 +634,7 @@ namespace QuickCrop {
                 bool selected = (e.State & DrawItemState.Selected) != 0;
                 using (Brush brush = new SolidBrush(selected ? SystemColors.Highlight : presets.BackColor)) e.Graphics.FillRectangle(brush, e.Bounds);
                 if (e.Index >= 0) TextRenderer.DrawText(e.Graphics, presets.Items[e.Index].ToString(), e.Font, e.Bounds,
-                    selected ? SystemColors.HighlightText : presets.ForeColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+                    selected ? SystemColors.HighlightText : presets.ForeColor, AppTheme.PaintFlags | TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
                 e.DrawFocusRectangle();
             };
             toolbar.Controls.AddRange(new Control[] { folder, selectAll, selectNone, presets, new ToolbarNumberHost(targetW), new ThemeLabel { Text = "x", AutoSize = true, Padding = new Padding(0,8,0,0) }, new ToolbarNumberHost(targetH), applySize, resize, seamCarving,
@@ -726,8 +749,12 @@ namespace QuickCrop {
         }
         void SetBusy(bool value, bool loading = false) {
             busy = value; this.loading = value && loading;
-            foreach (Control control in toolbar.Controls) control.Enabled = !value;
-            cancelProcessing.Visible = value && !loading;
+            toolbar.SuspendLayout();
+            try {
+                foreach (Control control in toolbar.Controls) control.Enabled = !value;
+                cancelProcessing.Visible = value && !loading;
+            } finally { toolbar.ResumeLayout(true); }
+            toolbar.Invalidate(true);
             grid.Enabled = !value || loading;
             UseWaitCursor = value && !loading;
             UpdateStatus();

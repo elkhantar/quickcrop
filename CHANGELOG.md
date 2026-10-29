@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix overlapping/ghosted toolbar text during loading by respecting clipped, translated paint buffers and repainting disabled controls cleanly.
 - Add global **Seam carving (experimental)**: remove low-energy seams from the whole oriented image to adjust aspect ratio, then optionally rescale to the target resolution.
 - Hide manual crop boxes and **Fit** in seam mode while remembering manual framing; persist the mode per folder.
 - Add carving progress and **Cancel processing**, preserving completed outputs and cleaning up cancelled temporary output.
