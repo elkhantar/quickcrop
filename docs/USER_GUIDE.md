@@ -14,6 +14,8 @@ The ratio of width to height determines the rectangle shape. Applying a differen
 
 ## Frame each image
 
+These controls apply with **Seam carving (experimental)** unchecked.
+
 - Drag **inside** the red rectangle to reposition it. The shaded area outside it will be discarded.
 - Wheel up over an image to shrink the crop, down to widen it. Zoom ranges from 1x to 20x; the widest crop is the largest rectangle that fits inside the source at the chosen ratio.
 - Red-dominant images use a yellow outline for contrast.
@@ -30,6 +32,18 @@ The image stays fitted within its card: wheel zoom changes the selected region, 
 
 **Resize output** checked: export the chosen region scaled to exactly the target resolution. Small regions are upscaled when necessary. Regardless of this setting, the content inside the rectangle is the content exported.
 
+## Seam carving (experimental)
+
+Check **Seam carving (experimental)** to process the **entire image**, with any selected rotation. Crop boxes and shading disappear, **Fit** is hidden, and wheel crop zoom is inactive. You can still select/deselect each image, click it to select it, rotate it, and use bulk selection. Manual framing is remembered when switching back; rotating or applying a different aspect ratio still resets manual framing as usual.
+
+The algorithm removes connected seams of low-energy pixels from the excess dimension until the image is approximately the chosen aspect ratio. It does not crop to your hidden manual rectangle and does not pre-shrink the source. With **Resize output** unchecked, save the carved dimensions: one original dimension stays unchanged and the other shrinks to the nearest whole pixel. With **Resize output** checked, carve first, then rescale to exactly the requested width and height, including upscaling when necessary.
+
+Previews show the whole source, not a prediction of the carved output. Try a small selection first. This is experimental: it can distort people, text, architecture, or any image with little expendable background. There is no subject detection or protection mask. Large reductions are particularly prone to artifacts. The working-size limit for actual carving is 24 megapixels; larger images already at the requested ratio can still bypass carving and be rescaled normally. Standard cropping retains its existing 100-megapixel source limit.
+
+Progress is shown during carving. **Cancel processing** becomes available during export. Completed files remain in the output folder; the active unfinished file and remaining jobs are skipped. Native decoding/encoding can finish its current call before cancellation is noticed. A cancelled encoding is not moved to a final output name, and temporary files are cleaned up normally. Hard process termination can still leave a temporary file.
+
+The global seam-carving checkbox is saved in the folder session. Older sessions open with it off.
+
 Click **Process selected…**, choose an output folder, and wait for the completion report. Outputs are named `name_crop.ext`, `name_crop_1.ext`, and so on. Existing files, directories, and originals are not replaced. Images are encoded to temporary files before being moved to their final names. A process interrupted while encoding can leave an expendable `.quickcrop-export-*.tmp` file, but does not publish it under a finished image name.
 
 PNG inputs produce PNG, preserving alpha. Other supported inputs produce quality-95 JPEG, flattening transparency onto white. Files are re-encoded; this is not lossless JPEG cropping. EXIF and ICC metadata are not copied to outputs, and rendering is not color managed.
@@ -42,7 +56,7 @@ The input folder gets these small companion files:
 
 | File | Purpose |
 | --- | --- |
-| `.quickcrop.json` | Selections, source-pixel crop rectangles, rotations, applied target dimensions, resize setting, and card size |
+| `.quickcrop.json` | Selections, source-pixel crop rectangles, rotations, applied target dimensions, resize and seam-carving settings, and card size |
 | `.quickcrop.json.bak` | Previous successful save |
 | `.quickcrop.lock` | Empty file used to coordinate app instances; its existence alone does not mean the folder is locked |
 
@@ -64,6 +78,6 @@ Malformed or oversized sessions are kept unchanged and autosave is disabled for 
 
 **Need to stop loading:** close the window. Further decode batches are cancelled, and partial selection/crop edits from this load are discarded without changing saved session data. An active native decoder may briefly finish its read in the background; it does not hold the window open or write image/session data.
 
-**Need to stop exporting:** this version still waits for the current export batch before closing. There is no export Cancel control yet. Keep export batches manageable.
+**Need to stop exporting:** click **Cancel processing**, then close after the cancellation report. Completed outputs are retained. Native codec calls can take a moment to return before cancellation takes effect.
 
 **Theme looks different:** the app follows the Windows app light/dark setting; high-contrast system colors take precedence. Native picker dialogs and some native control decorations still follow Windows rendering.

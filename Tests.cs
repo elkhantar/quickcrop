@@ -342,6 +342,7 @@ class Tests {
             Sessions(temp);
             ReviewTests.Run(temp);
             ClosingDuringLoad(temp);
+            SeamCarverTests.Run(temp);
             using (Bitmap source = new Bitmap(400,300)) {
                 using (Graphics g = Graphics.FromImage(source)) { g.Clear(Color.Blue); g.FillRectangle(Brushes.Red,200,0,200,300); }
                 source.Tag = "sample.png";

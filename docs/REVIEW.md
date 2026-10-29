@@ -26,10 +26,12 @@ The full local suite includes the existing preview/export pixel tests, EXIF/DPI 
 
 Follow-up improvements: disabled dark-theme labels, checkboxes, and numeric displays now retain readable text during loading/export. Closing during image loading cancels and exits without saving partial session state. Autosave is held until a load succeeds. Tests hold a decoded batch pending to verify close responsiveness, no session/backup modifications (including timestamps), prompt lock release, pending thumbnail disposal, and no subsequent batches.
 
+2026-10-29: added optional **Seam carving (experimental)**. It uses the entire oriented image and keeps manual crop state separate. New tests check both axes against a full-recomputation reference, alpha, narrow images, whole-source export, carving-before-rescaling, mode/session compatibility, and cancellation without publishing a partial output. Actual carving is capped at 24 MP. Severe reductions can distort important content despite high gradients; this mode is not a semantic subject-preservation guarantee.
+
 ## Remaining limits and improvements
 
 - **Scaling:** every card/thumbnail stays in memory. The worker pool bounds concurrent decodes, not the entire folder. A virtualized grid and bounded thumbnail cache are the next substantial performance change.
-- **Export cancellation:** closing during image loading now cancels and discards that load's edits immediately. Export still waits for completion before closing; a dedicated export cancellation control is still useful work. Native decoders cannot be interrupted mid-call, but their read-only background work does not hold a loading window open.
+- **Export cancellation:** **Cancel processing** now cancels carving and remaining export work while retaining completed outputs. Native decoder/encoder calls cannot be interrupted mid-call; cancellation is checked after those return and before final-file publication. Closing during loading still exits immediately without session writes.
 - **Resource limits:** 100 MP / 64 MP caps reduce avoidable allocations but do not guarantee a batch fits available memory, particularly for formats that decode fully inside native codecs.
 - **Source identity:** size and timestamp detect ordinary changes, not deliberately timestamp-preserving edits. Hashing full images would be stronger but would add significant folder I/O.
 - **Storage:** session backup/replacement and output moves use Windows filesystem guarantees. Network shares and removable filesystems may behave differently; simultaneous writes by unrelated tools can still race the final revision check.

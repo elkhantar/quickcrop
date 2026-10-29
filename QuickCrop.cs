@@ -91,7 +91,8 @@ namespace QuickCrop {
               }
             }
         }
-        public static void Save(Bitmap source, RectangleF crop, int width, int height, string output) {
+        public static void Save(Bitmap source, RectangleF crop, int width, int height, string output, CancellationToken cancellation = default(CancellationToken)) {
+            cancellation.ThrowIfCancellationRequested();
             ValidateSize(width,height,MaxOutputPixels);
             if (float.IsNaN(crop.X) || float.IsInfinity(crop.X) || float.IsNaN(crop.Y) || float.IsInfinity(crop.Y) ||
                 float.IsNaN(crop.Width) || float.IsInfinity(crop.Width) || float.IsNaN(crop.Height) || float.IsInfinity(crop.Height) ||
@@ -112,6 +113,7 @@ namespace QuickCrop {
                 string ext = png ? ".png" : ".jpg";
                 string temp = Path.Combine(output,".quickcrop-export-"+Guid.NewGuid().ToString("N")+".tmp");
                 try {
+                    cancellation.ThrowIfCancellationRequested();
                         using (FileStream stream = new FileStream(temp,FileMode.CreateNew,FileAccess.Write,FileShare.None)) {
                             if (png) result.Save(stream, ImageFormat.Png);
                             else {
@@ -131,6 +133,7 @@ namespace QuickCrop {
                         }
                     // Publish only a complete encoding. Move never replaces an existing file.
                     for (int n = 0; ; n++) {
+                        cancellation.ThrowIfCancellationRequested();
                         string path = stem+(n == 0 ? "" : "_"+n)+ext;
                         try { File.Move(temp,path); break; }
                         catch (IOException) { if (File.Exists(path) || Directory.Exists(path)) continue; throw; }
@@ -153,7 +156,7 @@ namespace QuickCrop {
     public sealed class FolderSession {
         public int Version = 1;
         public int TargetWidth = 1920, TargetHeight = 1080, CardSize = 360;
-        public bool Resize;
+        public bool Resize, SeamCarving;
         public List<ImageState> Images = new List<ImageState>();
     }
     public static class SessionStore {
@@ -230,21 +233,38 @@ namespace QuickCrop {
         readonly string path;
         readonly long length, timestamp;
         readonly int turns, sourceWidth, sourceHeight, outputWidth, outputHeight;
+        readonly int aspectWidth, aspectHeight;
+        readonly bool seamCarving;
         public readonly RectangleF Crop;
         public string Name { get { return Path.GetFileName(path); } }
-        public ExportJob(Card card, bool resize, int width, int height) {
+        public ExportJob(Card card, bool resize, int width, int height, bool seamCarving = false) {
             path = card.FilePath; turns = card.Turns; sourceWidth = card.View.SourceWidth; sourceHeight = card.View.SourceHeight;
+            this.seamCarving = seamCarving; aspectWidth = width; aspectHeight = height;
             length = card.FileLength; timestamp = card.LastWriteUtcTicks;
             Crop = card.View.Crop;
-            outputWidth = resize ? width : Math.Max(1,(int)Math.Round(Crop.Width));
-            outputHeight = resize ? height : Math.Max(1,(int)Math.Round(Crop.Height));
+            Size carvedSize = seamCarving ? SeamCarver.AspectSize(sourceWidth,sourceHeight,width,height) : Size.Empty;
+            outputWidth = resize ? width : seamCarving ? carvedSize.Width : Math.Max(1,(int)Math.Round(Crop.Width));
+            outputHeight = resize ? height : seamCarving ? carvedSize.Height : Math.Max(1,(int)Math.Round(Crop.Height));
         }
-        public void Execute(string output) {
+        public void Execute(string output, CancellationToken cancellation = default(CancellationToken), IProgress<int> progress = null) {
+            cancellation.ThrowIfCancellationRequested();
+            Imaging.ValidateSize(outputWidth,outputHeight,Imaging.MaxOutputPixels);
             using (Bitmap full = Imaging.Open(path,length,timestamp)) {
+                cancellation.ThrowIfCancellationRequested();
                 for (int i = 0; i < turns; i++) full.RotateFlip(RotateFlipType.Rotate270FlipNone);
                 if (full.Width != sourceWidth || full.Height != sourceHeight) throw new InvalidDataException("Source dimensions no longer match the preview.");
-                // The same oriented source-pixel rectangle is used for preview, persistence, and export.
-                full.Tag = path; Imaging.Save(full,Crop,outputWidth,outputHeight,output);
+                full.Tag = path;
+                if (seamCarving) {
+                    Size carvedSize = SeamCarver.AspectSize(full.Width,full.Height,aspectWidth,aspectHeight);
+                    if (carvedSize == full.Size) {
+                        if (progress != null) progress.Report(100);
+                        Imaging.Save(full,new RectangleF(0,0,full.Width,full.Height),outputWidth,outputHeight,output,cancellation);
+                    } else using (Bitmap carved = SeamCarver.Carve(full,aspectWidth,aspectHeight,cancellation,progress))
+                        Imaging.Save(carved,new RectangleF(0,0,carved.Width,carved.Height),outputWidth,outputHeight,output,cancellation);
+                } else {
+                    // Manual mode uses the very same source-pixel rectangle as the preview.
+                    Imaging.Save(full,Crop,outputWidth,outputHeight,output,cancellation);
+                }
             }
         }
     }
@@ -380,7 +400,7 @@ namespace QuickCrop {
             if (message.Msg != 0x020A || owner.IsDisposed || !owner.Visible || !owner.ContainsFocus) return false;
             Point cursor = Cursor.Position;
             CropView view = Control.FromHandle(WindowFromPoint(new NativePoint { X = cursor.X, Y = cursor.Y })) as CropView;
-            if (view == null || !view.Enabled || view.FindForm() != owner) return false;
+            if (view == null || !view.Enabled || view.SeamCarving || view.FindForm() != owner) return false;
             int delta = unchecked((short)((message.WParam.ToInt64() >> 16) & 0xffff));
             Point local = view.PointToClient(cursor);
             view.HandleWheel(new HandledMouseEventArgs(MouseButtons.None,0,local.X,local.Y,delta));
@@ -396,6 +416,11 @@ namespace QuickCrop {
         private bool dragging;
         private Point last;
         readonly bool redDominant;
+        bool seamCarving;
+        public bool SeamCarving {
+            get { return seamCarving; }
+            set { seamCarving = value; dragging = false; Capture = false; Cursor = value ? Cursors.Default : Cursors.Hand; Invalidate(); }
+        }
         public CropView(Bitmap preview) {
             Preview = preview; Size original = Imaging.SourceSize(preview);
             SourceWidth = original.Width; SourceHeight = original.Height; CX = SourceWidth/2.0; CY = SourceHeight/2.0;
@@ -436,6 +461,7 @@ namespace QuickCrop {
             RectangleF box = new RectangleF(image.X+crop.X*s, image.Y+crop.Y*s, crop.Width*s, crop.Height*s);
             e.Graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
             e.Graphics.DrawImage(Preview, image);
+            if (SeamCarving) return;
             using (Region mask = new Region(image)) {
                 mask.Exclude(box);
                 using (Brush shade = new SolidBrush(Color.FromArgb(115, 0, 0, 0))) e.Graphics.FillRegion(shade, mask);
@@ -446,6 +472,7 @@ namespace QuickCrop {
         protected override void OnMouseDown(MouseEventArgs e) {
             base.OnMouseDown(e); Focus();
             if (e.Button != MouseButtons.Left || !ImageRect.Contains(e.Location)) return;
+            if (SeamCarving) { if (Interacted != null) Interacted(); return; }
             RectangleF r = ImageRect, c = Crop; float s = r.Width/SourceWidth;
             if (!new RectangleF(r.X+c.X*s,r.Y+c.Y*s,c.Width*s,c.Height*s).Contains(e.Location)) return;
             dragging = true; last = e.Location; Capture = true; if (Interacted != null) Interacted();
@@ -460,6 +487,7 @@ namespace QuickCrop {
         protected override void OnMouseUp(MouseEventArgs e) { base.OnMouseUp(e); dragging = false; Capture = false; }
         protected override void OnMouseCaptureChanged(EventArgs e) { base.OnMouseCaptureChanged(e); if (!Capture) dragging = false; }
         protected override void OnMouseWheel(MouseEventArgs e) {
+            if (SeamCarving) return;
             if (!ImageRect.Contains(e.Location)) return;
             HandledMouseEventArgs handled = e as HandledMouseEventArgs; if (handled != null) handled.Handled = true;
             RectangleF c = Crop; CX = c.X+c.Width/2; CY = c.Y+c.Height/2;
@@ -474,6 +502,7 @@ namespace QuickCrop {
         public readonly CropView View;
         public readonly CheckBox Selected = new ThemeCheckBox();
         public readonly long FileLength, LastWriteUtcTicks;
+        readonly Button resetCrop;
         public int Turns;
         public Card(string path, Bitmap preview, double ratio, Action changed) {
             FilePath = path; Margin = new Padding(8); Padding = new Padding(8); BackColor = Color.FromArgb(43,48,57);
@@ -489,14 +518,15 @@ namespace QuickCrop {
             Selected.CheckedChanged += delegate { changed(); };
             Button rotate = new ThemeButton { Text = "\u21b6", Width = 38, Height = 36, Left = 5, Top = 48, FlatStyle = FlatStyle.Flat, AccessibleName = "Rotate left 90 degrees" };
             rotate.Click += delegate { RotateLeft(); };
-            Button reset = new ThemeButton { Text = "Fit", Width = 38, Height = 30, Left = 5, Top = 94, FlatStyle = FlatStyle.Flat, AccessibleName = "Reset crop" };
-            reset.Click += delegate { View.Reset(View.Ratio); Selected.Checked = true; };
-            side.Controls.AddRange(new Control[] { Selected, rotate, reset });
+            resetCrop = new ThemeButton { Text = "Fit", Width = 38, Height = 30, Left = 5, Top = 94, FlatStyle = FlatStyle.Flat, AccessibleName = "Reset crop" };
+            resetCrop.Click += delegate { View.Reset(View.Ratio); Selected.Checked = true; };
+            side.Controls.AddRange(new Control[] { Selected, rotate, resetCrop });
             Label name = new ThemeLabel { Text = Path.GetFileName(path), AutoEllipsis = true, Dock = DockStyle.Bottom, Height = 28, TextAlign = ContentAlignment.MiddleLeft };
             Controls.Add(View); Controls.Add(side); Controls.Add(name);
             View.Interacted += delegate { Selected.Checked = true; };
             View.Changed += changed;
         }
+        public void SetSeamCarving(bool enabled) { View.SeamCarving = enabled; resetCrop.Visible = !enabled; }
         public void RotateLeft() {
             Turns = (Turns+1)%4; View.Preview.RotateFlip(RotateFlipType.Rotate270FlipNone);
             int oldWidth = View.SourceWidth; View.SourceWidth = View.SourceHeight; View.SourceHeight = oldWidth;
@@ -530,9 +560,12 @@ namespace QuickCrop {
         readonly NumericUpDown targetW = new NumericUpDown { Minimum = 1, Maximum = 16384, Value = 1920, Width = 80 };
         readonly NumericUpDown targetH = new NumericUpDown { Minimum = 1, Maximum = 16384, Value = 1080, Width = 80 };
         readonly CheckBox resize = new ThemeCheckBox { Text = "Resize output", AutoSize = true, Padding = new Padding(8,5,8,0) };
+        readonly CheckBox seamCarving = new ThemeCheckBox { Text = "Seam carving (experimental)", AutoSize = true, Padding = new Padding(8,5,8,0) };
+        readonly Label instructions = new ThemeLabel { AutoSize = true };
         readonly TrackBar size = new TrackBar { Minimum = 240, Maximum = 720, Value = 360, Width = 135, Height = 32, TickStyle = TickStyle.None, SmallChange = 20, LargeChange = 80 };
         readonly Button process;
         readonly Button applySize;
+        readonly Button cancelProcessing;
         readonly ComboBox presets = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 160 };
         readonly Label sessionNotice = new ThemeLabel { Dock = DockStyle.Bottom, Height = 26, Padding = new Padding(15,3,0,0), AutoEllipsis = true };
         readonly System.Windows.Forms.Timer saveTimer = new System.Windows.Forms.Timer { Interval = 500 };
@@ -542,6 +575,7 @@ namespace QuickCrop {
         SessionLease sessionLease;
         readonly CropWheelRouter wheelRouter;
         CancellationTokenSource loadCancellation;
+        CancellationTokenSource processCancellation;
         int appliedWidth = 1920, appliedHeight = 1080;
         bool busy, loading, discardLoadingSession, updating, restoring, bulkEditing, sessionWritable = true, sessionDirty, dimensionsDirty;
         double Ratio { get { return (double)appliedWidth/appliedHeight; } }
@@ -565,6 +599,11 @@ namespace QuickCrop {
             targetW.ValueChanged += dimensions; targetH.ValueChanged += dimensions;
             process = MakeButton("Process selected...", async delegate { await Process(); });
             applySize = MakeButton("Apply size",delegate { ApplyDimensions(); });
+            cancelProcessing = MakeButton("Cancel processing",delegate {
+                if (processCancellation != null) processCancellation.Cancel();
+                cancelProcessing.Enabled = false; status.Text = "Cancelling processing...";
+            });
+            cancelProcessing.Visible = false;
             Button selectAll = MakeButton("Select all",delegate { SetAllSelected(true); });
             Button selectNone = MakeButton("Select none",delegate { SetAllSelected(false); });
             presets.DrawMode = DrawMode.OwnerDrawFixed;
@@ -575,13 +614,14 @@ namespace QuickCrop {
                     selected ? SystemColors.HighlightText : presets.ForeColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
                 e.DrawFocusRectangle();
             };
-            toolbar.Controls.AddRange(new Control[] { folder, selectAll, selectNone, presets, new ToolbarNumberHost(targetW), new ThemeLabel { Text = "x", AutoSize = true, Padding = new Padding(0,8,0,0) }, new ToolbarNumberHost(targetH), applySize, resize,
-                new ThemeLabel { Text = "Card size", AutoSize = true, Padding = new Padding(10,5,0,0) }, size, process });
+            toolbar.Controls.AddRange(new Control[] { folder, selectAll, selectNone, presets, new ToolbarNumberHost(targetW), new ThemeLabel { Text = "x", AutoSize = true, Padding = new Padding(0,8,0,0) }, new ToolbarNumberHost(targetH), applySize, resize, seamCarving,
+                new ThemeLabel { Text = "Card size", AutoSize = true, Padding = new Padding(10,5,0,0) }, size, process, cancelProcessing });
             FlowLayoutPanel help = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 42, Padding = new Padding(16,8,0,0) };
-            help.Controls.Add(new ThemeLabel { Text = "Drag the crop to frame an image. Wheel up: tighter crop. Wheel down: wider crop. Editing selects the image.", AutoSize = true });
+            help.Controls.Add(instructions);
             Controls.Add(grid); Controls.Add(help); Controls.Add(toolbar); Controls.Add(sessionNotice); Controls.Add(status);
             size.ValueChanged += delegate { grid.SuspendLayout(); foreach (Card card in Cards) SizeCard(card); grid.ResumeLayout(); QueueSave(); };
             resize.CheckedChanged += delegate { UpdateStatus(); QueueSave(); };
+            seamCarving.CheckedChanged += delegate { UpdateProcessingMode(); QueueSave(); };
             saveTimer.Tick += delegate { SaveSessionNow(); };
             FormClosing += delegate(object sender, FormClosingEventArgs e) {
                 if (loading) { CancelLoadingForExit(); return; }
@@ -589,6 +629,7 @@ namespace QuickCrop {
                 else if (!SaveSessionNow()) e.Cancel = MessageBox.Show(this,"Selections could not be saved. Close without saving?\n\n"+sessionNotice.Text,"Unsaved session",MessageBoxButtons.YesNo,MessageBoxIcon.Warning,MessageBoxDefaultButton.Button2) != DialogResult.Yes;
             };
             UpdateStatus();
+            UpdateProcessingMode();
             AppTheme.Apply(this, AppTheme.IsDark);
             Shown += delegate { AlignToolbarControls(); };
             wheelRouter = new CropWheelRouter(this); Application.AddMessageFilter(wheelRouter);
@@ -609,6 +650,7 @@ namespace QuickCrop {
                 presets.ItemHeight = Math.Max(Font.Height,height-comboChrome);
                 foreach (ToolbarNumberHost host in toolbar.Controls.OfType<ToolbarNumberHost>()) host.Height = height;
                 resize.Padding = new Padding(8,Math.Max(0,(height-resize.Font.Height-4)/2),8,0);
+                seamCarving.Padding = resize.Padding;
                 size.Height = height;
             } finally { toolbar.ResumeLayout(); }
         }
@@ -632,6 +674,13 @@ namespace QuickCrop {
             UpdateStatus(); QueueSave();
         }
         void CardChanged() { if (bulkEditing) return; UpdateStatus(); QueueSave(); }
+        void UpdateProcessingMode() {
+            foreach (Card card in Cards) card.SetSeamCarving(seamCarving.Checked);
+            instructions.Text = seamCarving.Checked ?
+                "Whole image mode: select or rotate images, then process. Seam carving is experimental; it may distort content and take time." :
+                "Drag the crop to frame an image. Wheel up: tighter crop. Wheel down: wider crop. Editing selects the image.";
+            UpdateStatus();
+        }
         void QueueSave() {
             if (restoring || currentFolder == null || discardLoadingSession || IsDisposed || Disposing) return;
             sessionDirty = true;
@@ -650,8 +699,8 @@ namespace QuickCrop {
             try {
                 foreach (Card card in Cards) remembered[Path.GetFileName(card.FilePath)] = card.CaptureState();
                 sessionRevision = SessionStore.Save(currentFolder,new FolderSession { TargetWidth = appliedWidth, TargetHeight = appliedHeight,
-                    Resize = resize.Checked, CardSize = size.Value, Images = remembered.Values.OrderBy(s => s.Name,StringComparer.OrdinalIgnoreCase).ToList() },sessionRevision);
-                sessionDirty = false; sessionNotice.Text = "Selections and crop boxes saved."; return true;
+                    Resize = resize.Checked, SeamCarving = seamCarving.Checked, CardSize = size.Value, Images = remembered.Values.OrderBy(s => s.Name,StringComparer.OrdinalIgnoreCase).ToList() },sessionRevision);
+                sessionDirty = false; sessionNotice.Text = "Selections and processing settings saved."; return true;
             } catch (Exception ex) { sessionNotice.Text = "Could not save selections: "+ex.Message; return false; }
         }
         protected override void Dispose(bool disposing) {
@@ -671,11 +720,15 @@ namespace QuickCrop {
         void UpdateStatus() {
             if (process != null) process.Enabled = !busy && !dimensionsDirty && Cards.Any();
             if (applySize != null) applySize.Enabled = !busy && dimensionsDirty;
+            if (cancelProcessing != null) cancelProcessing.Enabled = busy && !loading && processCancellation != null && !processCancellation.IsCancellationRequested;
             status.Text = dimensionsDirty ? "Click Apply size to use the edited dimensions. Existing crop boxes are unchanged until applied." :
-                Cards.Count() == 0 ? "Open a folder to begin. Supported: JPG, PNG, BMP, GIF, TIFF." : Cards.Count()+" images  |  "+Cards.Count(c => c.Selected.Checked)+" selected  |  "+(resize.Checked ? "Resize" : "Crop only");
+                Cards.Count() == 0 ? "Open a folder to begin. Supported: JPG, PNG, BMP, GIF, TIFF." : Cards.Count()+" images  |  "+Cards.Count(c => c.Selected.Checked)+" selected  |  "+(seamCarving.Checked ? "Seam carving (experimental)" : "Manual crop")+"  |  "+(resize.Checked ? "Resize" : seamCarving.Checked ? "Keep carved size" : "Crop only");
         }
         void SetBusy(bool value, bool loading = false) {
-            busy = value; this.loading = value && loading; toolbar.Enabled = !value; grid.Enabled = !value || loading;
+            busy = value; this.loading = value && loading;
+            foreach (Control control in toolbar.Controls) control.Enabled = !value;
+            cancelProcessing.Visible = value && !loading;
+            grid.Enabled = !value || loading;
             UseWaitCursor = value && !loading;
             UpdateStatus();
         }
@@ -719,7 +772,7 @@ namespace QuickCrop {
                 try {
                     targetW.Value = session.TargetWidth; targetH.Value = session.TargetHeight;
                     appliedWidth = session.TargetWidth; appliedHeight = session.TargetHeight; dimensionsDirty = false;
-                    resize.Checked = session.Resize; size.Value = session.CardSize;
+                    resize.Checked = session.Resize; seamCarving.Checked = session.SeamCarving; size.Value = session.CardSize;
                     presets.SelectedIndex = 6;
                     for (int p = 0; p < 6; p++) if (presets.Items[p].ToString().StartsWith(session.TargetWidth+" x "+session.TargetHeight+" ",StringComparison.Ordinal)) { presets.SelectedIndex = p; break; }
                 } finally { updating = false; restoring = false; }
@@ -747,6 +800,7 @@ namespace QuickCrop {
                                     restoring = true;
                                     try { if (remembered.TryGetValue(Path.GetFileName(result.Path),out state)) card.Restore(state); }
                                     finally { restoring = false; }
+                                    card.SetSeamCarving(seamCarving.Checked);
                                     SizeCard(card); AppTheme.Apply(card, AppTheme.IsDark); grid.Controls.Add(card);
                                 } catch (Exception ex) {
                                     if (card != null) card.Dispose(); errors.Add(Path.GetFileName(result.Path)+": "+ex.Message);
@@ -782,17 +836,26 @@ namespace QuickCrop {
                 if (dialog.ShowDialog(this) != DialogResult.OK) return;
                 string output = dialog.SelectedPath; bool doResize = resize.Checked; int w = appliedWidth, h = appliedHeight;
                 SaveSessionNow();
-                ExportJob[] jobs = selected.Select(c => new ExportJob(c,doResize,w,h)).ToArray();
+                ExportJob[] jobs = selected.Select(c => new ExportJob(c,doResize,w,h,seamCarving.Checked)).ToArray();
+                CancellationTokenSource cancellation = new CancellationTokenSource(); processCancellation = cancellation;
+                CancellationToken token = cancellation.Token;
                 SetBusy(true); List<string> errors = new List<string>(); int saved = 0;
                 try {
                     foreach (ExportJob job in jobs) {
+                        if (token.IsCancellationRequested) break;
                         status.Text = "Exporting "+(saved+errors.Count+1)+" / "+selected.Length+" - "+job.Name;
                         try {
-                            await Task.Run(() => job.Execute(output)); saved++;
+                            IProgress<int> progress = new Progress<int>(percent => {
+                                if (!token.IsCancellationRequested && !IsDisposed && !Disposing) status.Text = "Seam carving "+percent+"% - "+job.Name;
+                            });
+                            await Task.Run(() => job.Execute(output,token,progress)); saved++;
+                        } catch (OperationCanceledException) {
+                            if (!token.IsCancellationRequested) throw;
+                            break;
                         } catch (Exception ex) { errors.Add(job.Name+": "+ex.Message); }
                     }
-                } finally { SetBusy(false); UpdateStatus(); }
-                MessageBox.Show(this, saved+" images saved to:\n"+output+(errors.Count == 0 ? "" : "\n\n"+errors.Count+" failed:\n"+String.Join("\n",errors.Take(12))), "Export complete");
+                } finally { processCancellation = null; cancellation.Dispose(); SetBusy(false); UpdateStatus(); }
+                MessageBox.Show(this, (token.IsCancellationRequested ? "Processing cancelled. Completed outputs were kept.\n\n" : "")+saved+" images saved to:\n"+output+(errors.Count == 0 ? "" : "\n\n"+errors.Count+" failed:\n"+String.Join("\n",errors.Take(12))), token.IsCancellationRequested ? "Processing cancelled" : "Export complete");
             }
         }
     }

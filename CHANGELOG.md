@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add global **Seam carving (experimental)**: remove low-energy seams from the whole oriented image to adjust aspect ratio, then optionally rescale to the target resolution.
+- Hide manual crop boxes and **Fit** in seam mode while remembering manual framing; persist the mode per folder.
+- Add carving progress and **Cancel processing**, preserving completed outputs and cleaning up cancelled temporary output.
+- Add independent seam reference comparisons, whole-image/resizing/rotation/cancellation tests, and experimental-feature documentation.
 - Allow immediate close during image loading, cancel remaining decode work, and discard partial edits without saving JSON or its backup.
 - Align toolbar dropdown and dimension fields with button heights; keep disabled button text readable in dark mode.
 - Keep disabled checkbox labels, ordinary labels, and dimension values readable during folder loading and export too.

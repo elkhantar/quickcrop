@@ -1,7 +1,7 @@
 param([switch]$DryRun)
 $ErrorActionPreference = 'Stop'
 $repository = 'https://github.com/elkhantar/quickcrop.git'
-$sourceFiles = @('.gitattributes', '.gitignore', 'CHANGELOG.md', 'LICENSE', 'QuickCrop.cs', 'README.md', 'ReviewTests.cs', 'Tests.cs', 'build.ps1', 'test.ps1', 'package.ps1', 'publish.ps1', 'docs')
+$sourceFiles = @('.gitattributes', '.gitignore', 'CHANGELOG.md', 'LICENSE', 'QuickCrop.cs', 'SeamCarver.cs', 'README.md', 'ReviewTests.cs', 'SeamCarverTests.cs', 'Tests.cs', 'build.ps1', 'test.ps1', 'package.ps1', 'publish.ps1', 'docs')
 if ($DryRun) {
     Write-Host "Target: $repository"
     Write-Host 'Stages only source, tests, scripts, docs, and license; commits changes; pushes HEAD to main without force.'
